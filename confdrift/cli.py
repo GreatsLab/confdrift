@@ -19,7 +19,7 @@ def col(s, code):
 
 
 SEV = {"high": "1;31", "medium": "33", "low": "36"}
-OPS = {"add": ("+", "32"), "remove": ("-", "31"), "reorder": ("~", "35")}
+OPS = {"add": ("+", "32"), "remove": ("-", "31"), "reorder": ("~", "35"), "modify": ("~", "33")}
 
 
 def load(path):
@@ -58,10 +58,11 @@ def main(argv=None):
         print(json.dumps({
             "old": a.old, "new": a.new,
             "summary": _summary(changes),
-            "risks": [{"severity": r.severity, "why": r.why, "op": c.op,
-                       "section": " > ".join(c.path), "line": show(c.line)} for c, r in risks],
+            "risks": [{"severity": r.severity, "why": r.why, "detail": d, "op": c.op,
+                       "section": " > ".join(c.path), "line": show(c.line),
+                       "old": show(c.old) or None} for c, r, d in risks],
             "changes": [{"op": c.op, "path": list(c.path), "line": show(c.line),
-                         "lineno": c.lineno} for c in changes],
+                         "old": show(c.old) or None, "lineno": c.lineno} for c in changes],
         }, indent=2))
     else:
         _print_text(a, old_txt, new_txt, changes, risks, show)
@@ -70,9 +71,10 @@ def main(argv=None):
 
 
 def _summary(changes):
-    s = {"added": 0, "removed": 0, "reordered": 0}
+    s = {"added": 0, "removed": 0, "modified": 0, "reordered": 0}
     for c in changes:
-        s[{"add": "added", "remove": "removed", "reorder": "reordered"}[c.op]] += 1
+        s[{"add": "added", "remove": "removed", "modify": "modified",
+           "reorder": "reordered"}[c.op]] += 1
     s["sections"] = len({c.section or c.line for c in changes})
     return s
 
@@ -85,16 +87,21 @@ def _print_text(a, old_txt, new_txt, changes, risks, show):
     if not changes:
         print("  no semantic differences")
         return
-    print(f"  {s['added']} added, {s['removed']} removed, {s['reordered']} reordered "
+    print(f"  {s['added']} added, {s['removed']} removed, {s['modified']} modified, "
+          f"{s['reordered']} reordered "
           f"across {s['sections']} section(s)\n")
 
     if risks:
         print(col("RISK", "1"))
-        for c, r in risks:
+        for c, r, d in risks:
             where = " > ".join(c.path) or "global"
-            sym, cc = OPS[c.op]
-            print(f"  {col(r.severity.upper().ljust(6), SEV[r.severity])} {where}: {r.why}")
-            if c.op != "reorder":
+            why = f"{r.why} ({d})" if d else r.why
+            print(f"  {col(r.severity.upper().ljust(6), SEV[r.severity])} {where}: {why}")
+            if c.op == "modify":
+                print(f"         {col('- ' + show(c.old), '31')}")
+                print(f"         {col('+ ' + show(c.line), '32')}")
+            elif c.op != "reorder":
+                sym, cc = OPS[c.op]
                 print(f"         {col(sym + ' ' + show(c.line), cc)}")
         print()
     elif not a.risk_only:
@@ -113,6 +120,10 @@ def _print_text(a, old_txt, new_txt, changes, risks, show):
                 print("  " * depth + col(show(p), "2"))
         indent = "  " * len(path)
         for c in items:
+            if c.op == "modify":
+                print(f"{indent}{col('- ' + show(c.old), '31')}")
+                print(f"{indent}{col('+ ' + show(c.line), '32')}")
+                continue
             sym, cc = OPS[c.op]
             text = "(lines re-ordered)" if c.op == "reorder" else show(c.line)
             print(f"{indent}{col(sym + ' ' + text, cc)}")
@@ -125,7 +136,7 @@ def _exit_code(fail_on, changes, risks):
     if fail_on == "any":
         return 3 if changes else 0
     limit = SEVERITY_ORDER[fail_on]
-    return 3 if any(SEVERITY_ORDER[r.severity] <= limit for _, r in risks) else 0
+    return 3 if any(SEVERITY_ORDER[r.severity] <= limit for _, r, _ in risks) else 0
 
 
 if __name__ == "__main__":

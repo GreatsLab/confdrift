@@ -21,7 +21,11 @@ class RiskRule:
     why: str = ""
 
     def hits(self, ch: Change) -> bool:
-        if self.op != "any" and self.op != ch.op:
+        op = ch.op
+        if op == "modify":
+            # a modify is judged by its new value, same as an add
+            op = "add"
+        if self.op != "any" and self.op != op:
             return False
         if not re.search(self.line, ch.line):
             return False
@@ -41,7 +45,7 @@ RULES = [
     RiskRule("remove", r"^ip access-group ", r"^interface ", "high", "ACL removed from interface - traffic is no longer filtered"),
     RiskRule("add", r"^ip access-group ", r"^interface ", "medium", "ACL applied to interface - check it doesn't block your own session"),
     RiskRule("remove", r"^switchport trunk allowed vlan", r"^interface ", "high", "trunk allowed list removed (defaults to ALL vlans)"),
-    RiskRule("add", r"^switchport trunk allowed vlan(?! add)", r"^interface ", "high", "trunk allowed list replaced - vlans not listed will be pruned"),
+    RiskRule("add", r"^switchport trunk allowed vlan(?! add)", r"^interface ", "high", "trunk allowed list changed"),
     RiskRule("any", r"^access-class ", r"^line vty", "high", "VTY access-class changed - you can lock yourself out"),
     RiskRule("reorder", r"", r"access-list|route-map", "high", "entries re-ordered; first match wins, so behaviour changed"),
 
@@ -61,7 +65,7 @@ RULES = [
     RiskRule("add", r"^enable password ", "^$", "high", "'enable password' is reversible, use 'enable secret'"),
     RiskRule("remove", r"^enable secret ", "^$", "high", "enable secret removed"),
     RiskRule("remove", r"^service password-encryption$", "^$", "medium", "password encryption turned off"),
-    RiskRule("add", r"^transport input (telnet|all)", r"^line vty", "high", "telnet allowed on VTY"),
+    RiskRule("add", r"^transport input .*\b(telnet|all)\b", r"^line vty", "high", "telnet allowed on VTY"),
     RiskRule("add", r"^ip http server$", "^$", "medium", "HTTP server enabled"),
     RiskRule("remove", r"^aaa ", "^$", "high", "AAA config removed"),
     RiskRule("remove", r"^(logging host|logging \d)", "^$", "medium", "syslog destination removed"),
@@ -73,13 +77,58 @@ RULES = [
 SEVERITY_ORDER = {"high": 0, "medium": 1, "low": 2}
 
 
+def expand_vlans(spec: str) -> set:
+    """'10,20-22,99' -> {10, 20, 21, 22, 99}"""
+    out = set()
+    for part in spec.replace(" ", "").split(","):
+        if not part:
+            continue
+        if "-" in part:
+            lo, hi = part.split("-", 1)
+            out.update(range(int(lo), int(hi) + 1))
+        elif part.isdigit():
+            out.add(int(part))
+    return out
+
+
+def compress_vlans(vlans) -> str:
+    vs = sorted(vlans)
+    parts, i = [], 0
+    while i < len(vs):
+        j = i
+        while j + 1 < len(vs) and vs[j + 1] == vs[j] + 1:
+            j += 1
+        parts.append(str(vs[i]) if i == j else f"{vs[i]}-{vs[j]}")
+        i = j + 1
+    return ",".join(parts)
+
+
+TRUNK = "switchport trunk allowed vlan "
+
+
+def detail(ch: Change, rule: RiskRule) -> str:
+    """Extra context for some findings - mostly 'which vlans exactly'."""
+    if ch.op == "modify" and ch.line.startswith(TRUNK) and ch.old.startswith(TRUNK):
+        old_spec, new_spec = ch.old[len(TRUNK):], ch.line[len(TRUNK):]
+        if old_spec.startswith(("add", "remove")) or new_spec.startswith(("add", "remove")):
+            return ""
+        old_v, new_v = expand_vlans(old_spec), expand_vlans(new_spec)
+        bits = []
+        if old_v - new_v:
+            bits.append(f"pruned {compress_vlans(old_v - new_v)}")
+        if new_v - old_v:
+            bits.append(f"added {compress_vlans(new_v - old_v)}")
+        return ", ".join(bits)
+    return ""
+
+
 def assess(changes: list) -> list:
-    """Return [(change, rule)] for every change that trips a rule."""
+    """Return [(change, rule, detail)] for every change that trips a rule."""
     out = []
     for ch in changes:
         for rule in RULES:
             if rule.hits(ch):
-                out.append((ch, rule))
+                out.append((ch, rule, detail(ch, rule)))
                 break
     out.sort(key=lambda x: SEVERITY_ORDER[x[1].severity])
     return out

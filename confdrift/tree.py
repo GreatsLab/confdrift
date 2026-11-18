@@ -100,12 +100,38 @@ def parse(text: str) -> Node:
     return root
 
 
+# commands that can only appear once per section. If one is removed and
+# another added in the same place, that's a *modify*, not two changes -
+# matters for risk: replacing a trunk allowed list is not the same as
+# deleting it.
+SINGLE_VALUE = [
+    "switchport trunk allowed vlan", "switchport trunk native vlan",
+    "switchport access vlan", "switchport voice vlan", "switchport mode",
+    "description", "ip address", "ipv6 address", "transport input",
+    "transport output", "router-id", "hostname", "mtu", "ip mtu",
+    "bandwidth", "speed", "duplex", "ip ospf cost", "spanning-tree mode",
+    "snmp-server location", "snmp-server contact", "exec-timeout",
+    "ip domain name", "ip domain-name", "clock timezone", "version",
+]
+
+
+def single_value_key(line: str):
+    for k in SINGLE_VALUE:
+        if line == k or line.startswith(k + " "):
+            # "ip address x y secondary" can repeat, leave those alone
+            if k == "ip address" and line.endswith(" secondary"):
+                return None
+            return k
+    return None
+
+
 @dataclass
 class Change:
-    op: str            # add | remove | reorder
+    op: str            # add | remove | modify | reorder
     path: tuple        # parents, outermost first
-    line: str
+    line: str          # new line for add/modify, old line for remove
     lineno: int        # in the file it came from (new file for add, old for remove)
+    old: str = ""      # previous line, modify only
 
     @property
     def section(self) -> str:
@@ -118,10 +144,30 @@ def diff(old: Node, new: Node, path: tuple = ()) -> list:
     new_keys = list(new.children)
     old_set, new_set = set(old_keys), set(new_keys)
 
-    for k in old_keys:
-        if k not in new_set:
+    removed = [k for k in old_keys if k not in new_set]
+    added = [k for k in new_keys if k not in old_set]
+
+    # pair up single-value commands into modifies
+    modified = {}
+    for k in added:
+        key = single_value_key(k)
+        if not key or new.children[k].children:
+            continue
+        for o in removed:
+            if o not in modified and single_value_key(o) == key and not old.children[o].children:
+                modified[o] = k
+                break
+    gone = set(modified)
+    came = set(modified.values())
+
+    for k in removed:
+        if k not in gone:
             _collect(old.children[k], path, "remove", changes)
+    for o, k in modified.items():
+        changes.append(Change("modify", path, k, new.children[k].lineno, old=o))
     for k in new_keys:
+        if k in came:
+            continue
         if k not in old_set:
             _collect(new.children[k], path, "add", changes)
         else:
