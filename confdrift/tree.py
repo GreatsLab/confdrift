@@ -176,9 +176,19 @@ def diff(old: Node, new: Node, path: tuple = ()) -> list:
     if (old.ordered or new.ordered) and not changes_under(changes, path):
         common_old = [k for k in old_keys if k in new_set]
         common_new = [k for k in new_keys if k in old_set]
+        # with sequence numbers the box orders by seq, not by how the lines
+        # were pasted - "30 permit" above "20 deny" is still 20 then 30
+        if all(_seq(k) is not None for k in common_old):
+            common_old.sort(key=_seq)
+            common_new.sort(key=_seq)
         if common_old != common_new:
             changes.append(Change("reorder", path, old.text, new.lineno))
     return changes
+
+
+def _seq(line: str):
+    head = line.split(None, 1)[0]
+    return int(head) if head.isdigit() else None
 
 
 def changes_under(changes, path) -> bool:
